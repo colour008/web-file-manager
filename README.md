@@ -46,7 +46,7 @@ node server.js
 
 ### 4. 访问应用
 
-打开浏览器访问：`http://localhost:3001`或或 `http://localhost:3001/index.html`
+打开浏览器访问：`http://localhost:3001`或`http://localhost:3001/index.html`
 
 ## 📖 使用说明
 
