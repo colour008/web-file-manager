@@ -62,6 +62,10 @@ const pathUtils = {
 			? normalized
 			: normalized.substring(lastSlash + 1);
 	},
+	// 判断是否为快捷方式文件
+	isShortcut: function (fileName) {
+		return fileName.toLowerCase().endsWith('.lnk');
+	},
 };
 
 // ===================== 初始化事件绑定 =====================
@@ -273,7 +277,12 @@ async function exportToExcel() {
 		// 转换数据格式
 		const exportData = items.map((item) => ({
 			文件名: item.name,
-			类型: item.type === 'dir' ? '文件夹' : '文件',
+			类型:
+				item.type === 'dir'
+					? '文件夹'
+					: pathUtils.isShortcut(item.name)
+					? '文件夹快捷方式'
+					: '文件',
 			大小: item.type === 'dir' ? '-' : formatFileSize(item.size),
 			修改时间: item.mtime,
 			路径: item.path,
@@ -583,6 +592,10 @@ function createTreeNodeWrapper(isLast) {
 function createTreeNode(item, parentPath) {
 	const node = document.createElement('div');
 	node.className = `tree-node ${item.type}`;
+	// 为快捷方式添加专属类名
+	if (item.type === 'file' && pathUtils.isShortcut(item.name)) {
+		node.classList.add('shortcut-file');
+	}
 	node.dataset.path = item.path;
 	node.dataset.type = item.type;
 	node.dataset.name = item.name;
@@ -765,6 +778,19 @@ function sortFiles(items, field, direction) {
 						? 1
 						: -1;
 				}
+				// 排序时优先区分快捷方式
+				if (
+					pathUtils.isShortcut(a.name) &&
+					!pathUtils.isShortcut(b.name)
+				) {
+					return direction === 'asc' ? -1 : 1;
+				}
+				if (
+					!pathUtils.isShortcut(a.name) &&
+					pathUtils.isShortcut(b.name)
+				) {
+					return direction === 'asc' ? 1 : -1;
+				}
 				return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
 			});
 			break;
@@ -814,14 +840,21 @@ function renderFiles(items) {
 		// 卡片视图
 		let html = '<div class="file-list-card">';
 		items.forEach((item) => {
+			const isShortcut =
+				item.type === 'file' && pathUtils.isShortcut(item.name);
 			const icon =
 				item.type === 'dir'
 					? '<i class="item-icon dir fas fa-folder"></i>'
 					: getFileIcon(item.name, 'item-icon');
+			// 为快捷方式添加专属类名
+			const shortcutClass = isShortcut ? ' shortcut-file' : '';
 			html += `
-				<div class="file-item-card ${item.type}" data-path="${item.path}" data-type="${item.type}" data-name="${item.name}">
+				<div class="file-item-card ${item.type}${shortcutClass}" data-path="${
+				item.path
+			}" data-type="${item.type}" data-name="${item.name}">
 					${icon}
 					<div class="item-name">${item.name}</div>
+					${isShortcut ? '<div class="shortcut-tag">快捷方式</div>' : ''}
 				</div>
 			`;
 		});
@@ -875,16 +908,26 @@ function renderFiles(items) {
 				<tbody>
 		`;
 		items.forEach((item) => {
+			const isShortcut =
+				item.type === 'file' && pathUtils.isShortcut(item.name);
 			const icon =
 				item.type === 'dir'
 					? '<i class="list-item-icon dir fas fa-folder"></i>'
 					: getFileIcon(item.name, 'list-item-icon');
 			const fileSize =
 				item.type === 'dir' ? '-' : formatFileSize(item.size);
+			// 为快捷方式添加专属类名
+			const shortcutClass = isShortcut ? ' shortcut-file' : '';
 			html += `
-				<tr class="${item.type}" data-path="${item.path}" data-type="${item.type}" data-name="${item.name}">
+				<tr class="${item.type}${shortcutClass}" data-path="${item.path}" data-type="${
+				item.type
+			}" data-name="${item.name}">
 					<td>${icon}</td>
-					<td>${item.name}</td>
+					<td>${item.name} ${
+				isShortcut
+					? '<span class="shortcut-tag">（快捷方式）</span>'
+					: ''
+			}</td>
 					<td class="file-size">${fileSize}</td>
 					<td class="file-mtime">${item.mtime}</td>
 				</tr>
@@ -962,6 +1005,12 @@ function syncSelectionToLeft(path) {
 
 // 根据文件名获取对应图标（Font Awesome）
 function getFileIcon(fileName, prefix) {
+	// 优先判断是否为快捷方式
+	if (pathUtils.isShortcut(fileName)) {
+		const classPrefix = prefix ? `${prefix} file ` : 'node-icon file ';
+		return `<i class="${classPrefix}shortcut fas fa-external-link-alt"></i>`;
+	}
+
 	const ext = fileName.split('.').pop().toLowerCase();
 	const classPrefix = prefix ? `${prefix} file ` : 'node-icon file ';
 
@@ -1038,12 +1087,74 @@ function goBack() {
 	}
 }
 
-// 打开文件/目录
-function handleItemOpen(item) {
-	if (item.type === 'dir') {
+// 解析快捷方式目标路径（调用后端接口）
+async function resolveShortcutPath(shortcutPath) {
+	try {
+		const res = await fetch(`${baseUrl}/resolveShortcut`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ shortcutPath: shortcutPath }),
+		});
+		const data = await res.json();
+		if (data.code === 0) {
+			return data.data.targetPath;
+		} else {
+			alert(`❌ 解析快捷方式失败：${data.msg}`);
+			return null;
+		}
+	} catch (err) {
+		alert(`❌ 解析快捷方式失败：${err.message}`);
+		return null;
+	}
+}
+
+// 打开文件/目录（增强：支持快捷方式）
+// 优化：解析快捷方式目标路径（仅处理文件夹快捷方式）
+async function resolveShortcutPath(shortcutPath) {
+	try {
+		const res = await fetch(`${baseUrl}/resolveShortcut`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ shortcutPath: shortcutPath }),
+		});
+		const data = await res.json();
+		if (data.code === 0) {
+			return data.data.targetPath;
+		} else {
+			// 只提示错误，不阻断后续操作
+			console.log(`解析快捷方式失败：${data.msg}`);
+			// 非文件夹快捷方式，返回null，前端按普通文件处理
+			return null;
+		}
+	} catch (err) {
+		console.log(`解析快捷方式失败：${err.message}`);
+		return null;
+	}
+}
+
+// 优化：打开文件/目录（仅处理文件夹快捷方式）
+async function handleItemOpen(item) {
+	// 判断是否为.lnk文件（快捷方式）
+	if (item.type === 'file' && pathUtils.isShortcut(item.name)) {
+		showLoading('解析快捷方式中...');
+		// 解析快捷方式目标路径
+		const targetPath = await resolveShortcutPath(item.path);
+		hideLoading();
+
+		if (targetPath) {
+			// 是文件夹快捷方式，打开目标文件夹
+			document.getElementById('pathInput').value = targetPath;
+			loadPathData();
+		} else {
+			// 不是文件夹快捷方式，按普通文件打开
+			openFile(item.path);
+		}
+	} else if (item.type === 'dir') {
+		// 普通文件夹直接打开
 		document.getElementById('pathInput').value = item.path;
 		loadPathData();
 	} else {
+		// 普通文件调用系统打开
 		openFile(item.path);
 	}
 }
@@ -1089,6 +1200,16 @@ function showContextMenu(x, y, isBlank) {
 		document.getElementById('menuPaste').style.display = clipboard
 			? 'flex'
 			: 'none';
+
+		// 如果是快捷方式，修改"打开"菜单文本
+		if (
+			currentContextItem &&
+			pathUtils.isShortcut(currentContextItem.name)
+		) {
+			document.getElementById('menuOpen').textContent = '打开目标文件夹';
+		} else {
+			document.getElementById('menuOpen').textContent = '打开';
+		}
 	} else {
 		// 点击空白处：隐藏操作菜单，显示新建菜单
 		document.getElementById('menuOpen').style.display = 'none';
@@ -1131,10 +1252,10 @@ function handleBlankContextMenu(e) {
 
 // ===================== 右键菜单功能 =====================
 
-// 菜单-打开
-function handleMenuOpen() {
+// 菜单-打开（增强：支持快捷方式）
+async function handleMenuOpen() {
 	if (currentContextItem) {
-		handleItemOpen(currentContextItem);
+		await handleItemOpen(currentContextItem);
 		contextMenu.style.display = 'none';
 	}
 }
